@@ -1,41 +1,42 @@
-import Base
-import Chain
-import Covenants
-import Consensus
-import ExtCrypto
 import Foundation
 import Logging
+import CLevelDB
+
+import Base
+import Consensus
+import Covenants
+import ExtCrypto
 import Mempool
+import Chain
 import Protocol
 
-/// Shared atomic flag for coordinating mining threads.
-/// Uses a lock since Swift doesn't have portable atomics in 5.9.
-private final class MiningResult: @unchecked Sendable {
+/// Shared claim container for mining threads.
+/// First thread to find valid proof-of-work claims the singleton and
+/// other threads discard their work.
+private final class MiningResult: Sendable {
     private let lock = NSLock()
     private var _nonce: UInt64 = UInt64.max
-    private var _stopped = false
+    private var _claimed: Bool = false
 
-    /// Try to claim a winning nonce. Returns true if this thread won.
     func claim(_ nonce: UInt32) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard _nonce == UInt64.max else { return false }
+        guard !_claimed else { return false }
+        _claimed = true
         _nonce = UInt64(nonce)
         return true
     }
 
-    /// Signal all threads to stop (stale work or cancellation).
-    func stop() {
-        lock.lock()
-        _stopped = true
-        lock.unlock()
-    }
-
-    /// Check if mining should continue.
     var shouldStop: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return _stopped || _nonce != UInt64.max
+        return _claimed
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        _claimed = true
     }
 
     /// The winning nonce, or nil if none found.
@@ -46,6 +47,63 @@ private final class MiningResult: @unchecked Sendable {
     }
 }
 
+/// Thread-safe mining statistics tracker.
+/// Tracks hash counts and block mining metrics across all mining threads.
+private final class MiningStats: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _totalHashes: UInt64 = 0
+    private var _blocksMined: UInt64 = 0
+    private var _startTime: Date?
+    private var _lastBlockTime: Date?
+    private var _threadHashes: [Int: UInt64] = [:]
+
+    /// Register a hash completed by any mining thread.
+    func addHashes(_ count: UInt64, threadID: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        if _startTime == nil {
+            _startTime = Date()
+        }
+        _totalHashes += count
+        _threadHashes[threadID, default: 0] += count
+    }
+
+    /// Register a block mined.
+    func registerBlock() {
+        lock.lock()
+        defer { lock.unlock() }
+        _blocksMined += 1
+        _lastBlockTime = Date()
+    }
+
+    /// Get current statistics.
+    func getStats() -> (totalHashes: UInt64, blocksMined: UInt64, elapsedTime: TimeInterval, avgBlockTime: TimeInterval?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (
+            totalHashes: _totalHashes,
+            blocksMined: _blocksMined,
+            elapsedTime: _startTime.map { Date().timeIntervalSince($0) } ?? 0.0,
+            avgBlockTime: calculateAvgBlockTime()
+        )
+    }
+
+    /// Get per-thread hash counts and calculates hash rates.
+    func getPerThreadStats() -> [(threadID: Int, hashes: UInt64, hashRate: Double)] {
+        lock.lock()
+        defer { lock.unlock() }
+        let elapsed = _startTime.map { Date().timeIntervalSince($0) } ?? 0.0
+        return _threadHashes.map { (tid, hashes) in
+            (tid, hashes, elapsed > 0 ? Double(hashes) / elapsed : 0.0)
+        }.sorted { $0.threadID < $1.threadID }
+    }
+
+    private func calculateAvgBlockTime() -> TimeInterval? {
+        guard _blocksMined > 0, let start = _startTime else { return nil }
+        let elapsed = Date().timeIntervalSince(start)
+        return elapsed / TimeInterval(_blocksMined)
+    }
+}
 /// A continuous CPU miner that runs as a background task.
 ///
 /// Uses all available CPU cores to mine in parallel. Each core works on a
@@ -59,6 +117,7 @@ public final class CPUMiner: Sendable {
     private let logger: Logger
     private let threads: Int
     private let onBlockMined: @Sendable (Block, ChainEntry) -> Void
+    private let stats: MiningStats = MiningStats()
 
     /// Create a CPU miner.
     ///
@@ -116,6 +175,28 @@ public final class CPUMiner: Sendable {
 
             self.logger.info("CPU miner stopped", source: "Miner")
         }
+    }
+
+    /// Get current mining statistics.
+    /// Returns a tuple with (totalHashes, blocksMined, elapsedTime, avgBlockTime).
+    public func getStats() -> (totalHashes: UInt64, blocksMined: UInt64, elapsedTime: TimeInterval, avgBlockTime: TimeInterval?) {
+        return stats.getStats()
+    }
+
+    /// Get per-thread mining statistics.
+    /// Returns an array of (threadID, hashes, hashRate).
+    public func getPerThreadStats() -> [(threadID: Int, hashes: UInt64, hashRate: Double)] {
+        return stats.getPerThreadStats()
+    }
+
+    /// Get the actual number of mining threads being used.
+    public var activeThreads: Int {
+        threads
+    }
+
+    /// Register a hash completed by a specific mining thread.
+    private func registerHashes(count: UInt64, threadID: Int) {
+        stats.addHashes(count, threadID: threadID)
     }
 
     /// Mine a single block on the current tip using all threads.
@@ -185,11 +266,11 @@ public final class CPUMiner: Sendable {
         let logger = self.logger
         for tid in 0..<threadCount {
             group.enter()
-            Thread.detachNewThread {
+            Thread.detachNewThread { [weak self] in
                 defer { group.leave() }
                 var nonce = UInt32(tid)
                 let stride = UInt32(threadCount)
-                var hashes: UInt64 = 0
+                var threadHashes: UInt64 = 0
 
                 while !result.shouldStop {
                     let h = BlockHeader(
@@ -207,20 +288,21 @@ public final class CPUMiner: Sendable {
                         logger.error("Mining thread \(tid) error: \(error)", source: "Miner")
                         return
                     }
-                    hashes += 1
+                    threadHashes += 1
+                    self?.registerHashes(count: 1, threadID: tid)
                     if Target256(bigEndian: hash.bytes) <= target {
                         _ = result.claim(nonce)
-                        logger.debug("Thread \(tid) found nonce \(nonce) after \(hashes) hashes", source: "Miner")
+                        logger.debug("Thread \(tid) found nonce \(nonce) after \(threadHashes) hashes", source: "Miner")
                         return
                     }
                     let (next, overflow) = nonce.addingReportingOverflow(stride)
                     if overflow {
-                        logger.debug("Thread \(tid) exhausted nonce space after \(hashes) hashes", source: "Miner")
+                        logger.debug("Thread \(tid) exhausted nonce space after \(threadHashes) hashes", source: "Miner")
                         return
                     }
                     nonce = next
                 }
-                logger.debug("Thread \(tid) stopped after \(hashes) hashes", source: "Miner")
+                logger.debug("Thread \(tid) stopped after \(threadHashes) hashes", source: "Miner")
             }
         }
 
@@ -316,6 +398,7 @@ public final class CPUMiner: Sendable {
             "nonce": "\(winningNonce)",
         ], source: "Miner")
 
+        stats.registerBlock()
         onBlockMined(block, entry)
     }
 

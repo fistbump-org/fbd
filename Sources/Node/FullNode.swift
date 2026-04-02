@@ -767,6 +767,7 @@ public final class FullNode: Sendable {
                     ctx.emitEvent("{\"type\":\"mined\",\"height\":\(entry.height),\"reward\":\(reward)}")
                 }
             )
+            ctx.miner = miner
             minerTask = miner.start()
         }
 

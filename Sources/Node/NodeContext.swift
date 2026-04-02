@@ -2,6 +2,7 @@ import Foundation
 import Base
 import Chain
 import Mempool
+import Mining
 import Net
 import Protocol
 import RPC
@@ -32,6 +33,9 @@ public final class NodeContext: @unchecked Sendable {
 
     /// Configured miner thread count (0 = auto).
     public var minerThreads: Int = 0
+
+    /// CPU miner instance (set when mining is enabled).
+    public var miner: CPUMiner?
 
     /// Lock protecting `wallets` and `rescanProgress`.
     private let lock = NSLock()

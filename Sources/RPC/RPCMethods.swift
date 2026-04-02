@@ -1,3 +1,4 @@
+import Foundation
 import Base
 import Covenants
 import Protocol
@@ -161,15 +162,58 @@ public enum RPCMethods {
         bits: UInt32,
         pooledtx: Int,
         cpuCount: Int = 0,
-        minerThreads: Int = 0
+        minerThreads: Int = 0,
+        totalHashes: UInt64 = 0,
+        blocksMined: UInt64 = 0,
+        elapsedTime: TimeInterval = 0,
+        hashRate: Double = 0,
+        avgBlockTime: Double? = nil,
+        memoryBandwidth: Double = 0,
+        perThreadStats: [(threadID: Int, hashes: UInt64, hashRate: Double)] = [],
+        avgHashRatePerThread: Double = 0
     ) -> JSONValue {
-        .object([
+        var result: [(String, JSONValue)] = [
             ("blocks", .int(Int64(height))),
             ("difficulty", .double(difficultyFromBits(bits))),
             ("pooledtx", .int(Int64(pooledtx))),
             ("cpus", .int(Int64(cpuCount))),
             ("minerThreads", .int(Int64(minerThreads))),
-        ])
+        ]
+
+        // Add mining stats if mining is active (elapsedTime > 0)
+        if elapsedTime > 0 {
+            result.append(("totalHashes", .int(Int64(totalHashes))))
+            result.append(("blocksMined", .int(Int64(blocksMined))))
+            result.append(("elapsedTime", .double(elapsedTime))) // seconds
+            result.append(("hashRate", .double(hashRate))) // hashes per second (H/s)
+            if let avgTime = avgBlockTime {
+                result.append(("avgBlockTime", .double(avgTime))) // seconds
+            }
+            result.append(("memoryBandwidth", .double(memoryBandwidth))) // Effective memory bandwidth: gigabytes of BalloonHash memory processed per second (upper bound estimate based on 512MB per hash)
+            // Example: convert to user-friendly display string:
+            //   let bw = String(format: "%.2f GB/s", memoryBandwidth)  // "0.50 GB/s", "1.25 GB/s", "4.00 GB/s"
+            // Pseudo-code for formatting with appropriate units:
+            //   IF memoryBandwidth >= 1.0:        display as "X.XX GB/s"
+            //   ELSE IF memoryBandwidth >= 0.001: display as "X.XX MB/s" (multiply by 1024)
+            //   ELSE:                             display as "X.XX KB/s" (multiply by 1024*1024)
+
+            // Add per-thread statistics
+            if !perThreadStats.isEmpty {
+                let threadsArray: [JSONValue] = perThreadStats.map { stat in
+                    .object([
+                        ("threadID", .int(Int64(stat.threadID))),
+                        ("hashes", .int(Int64(stat.hashes))),
+                        ("hashRate", .double(stat.hashRate)) // hashes per second (H/s)
+                    ])
+                }
+                result.append(("threads", .array(threadsArray)))
+
+                // Add average hash rate per thread (helps identify thread contention/imbalance)
+                result.append(("avgHashRatePerThread", .double(avgHashRatePerThread))) // hashes per second (H/s)
+            }
+        }
+
+        return .object(result)
     }
 
     // MARK: - Network

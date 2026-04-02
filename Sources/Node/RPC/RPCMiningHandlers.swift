@@ -25,12 +25,61 @@ extension FullNode {
                 guard let chain = ctx.chain else {
                     return RPCMethods.getMiningInfo(height: 0, bits: 0, pooledtx: 0, cpuCount: ctx.cpuCount, minerThreads: ctx.minerThreads)
                 }
+
+                var totalHashes: UInt64 = 0
+                var blocksMined: UInt64 = 0
+                var elapsedTime: TimeInterval = 0
+                var avgBlockTime: Double? = nil
+                var hashRate: Double = 0
+                var memoryBandwidth: Double = 0
+                var perThreadStats: [(threadID: Int, hashes: UInt64, hashRate: Double)] = []
+                var avgHashRatePerThread: Double = 0
+
+                var activeThreads = ctx.minerThreads
+                if let miner = ctx.miner {
+                    // Use the actual thread count being used by the miner
+                    activeThreads = miner.activeThreads
+
+                    let stats = miner.getStats()
+                    totalHashes = stats.totalHashes
+                    blocksMined = stats.blocksMined
+                    elapsedTime = stats.elapsedTime
+                    avgBlockTime = stats.avgBlockTime
+
+                    // Get per-thread statistics
+                    perThreadStats = miner.getPerThreadStats()
+
+                    // Calculate average hash rate per thread
+                    if !perThreadStats.isEmpty {
+                        let totalThreadHashRate = perThreadStats.reduce(0.0) { $0 + $1.hashRate }
+                        avgHashRatePerThread = totalThreadHashRate / Double(perThreadStats.count)
+                    }
+
+                    if elapsedTime > 0 {
+                        // Hash rate = hashes per second
+                        hashRate = Double(totalHashes) / elapsedTime
+
+                        // Memory bandwidth estimate = (totalHashes * 0.5GB) / elapsedTime
+                        // BalloonHash uses 512MB per hash as per specification
+                        let totalGBProcessed = Double(totalHashes) * 0.5 // 0.5GB per hash
+                        memoryBandwidth = totalGBProcessed / elapsedTime // GB per second
+                    }
+                }
+
                 return RPCMethods.getMiningInfo(
                     height: chain.height,
                     bits: chain.tip.bits,
                     pooledtx: ctx.mempool?.count ?? 0,
                     cpuCount: ctx.cpuCount,
-                    minerThreads: ctx.minerThreads
+                    minerThreads: activeThreads,
+                    totalHashes: totalHashes,
+                    blocksMined: blocksMined,
+                    elapsedTime: elapsedTime,
+                    hashRate: hashRate,
+                    avgBlockTime: avgBlockTime,
+                    memoryBandwidth: memoryBandwidth,
+                    perThreadStats: perThreadStats,
+                    avgHashRatePerThread: avgHashRatePerThread
                 )
             }
 
