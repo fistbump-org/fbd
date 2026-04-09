@@ -64,6 +64,25 @@ extension FullNode {
                 return .array(result)
             }
 
+        handlers["getaddresspool"] = { _ in
+                guard let pm = ctx.peerManager else { return .array([]) }
+                let entries = pm.syncGetAddressPool()
+                let result: [JSONValue] = entries.map { entry in
+                    return .object([
+                        ("host", .string(entry.host)),
+                        ("port", .int(Int64(entry.port))),
+                        ("addr", .string("\(entry.host):\(entry.port)")),
+                        ("time", .int(Int64(entry.time))),
+                        ("lastSeen", .int(Int64(entry.lastSeen))),
+                        ("agent", .string(entry.agent)),
+                        ("version", .int(Int64(entry.version))),
+                        ("services", .string(String(format: "%08x", entry.services))),
+                        ("height", .int(Int64(entry.height))),
+                    ])
+                }
+                return .array(result)
+            }
+
         handlers["addnode"] = { req in
                 let params = req.params
                 guard let pm = ctx.peerManager else {

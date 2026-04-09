@@ -227,8 +227,9 @@ public final class PeerManager: @unchecked Sendable {
     /// Parsed configured node addresses for reconnection.
     var configuredNodes: [(host: String, port: Int, key: [UInt8])] = []
 
-    /// Address pool for discovered peers (from addr gossip).
-    var addressPool: [String: (host: String, port: Int, time: UInt64)] = [:]
+    /// Address pool for discovered peers (from addr gossip, enriched with
+    /// handshake metadata when we successfully connect).
+    var addressPool: [String: AddressPoolEntry] = [:]
 
     /// Maximum entries in the address pool.
     static let maxAddressPool = 1000
@@ -542,15 +543,30 @@ extension PeerManager: PeerMessageDelegate {
         let peerListenPort = peerContext.state.listenPort
         if peerListenPort > 0, let ip = addr.ipv4String, !isPrivateIP(ip) {
             let routableAddr = "\(ip):\(peerListenPort)"
+            let now = UInt64(Date().timeIntervalSince1970)
             let peerAddr = NetAddress(
-                time: UInt64(Date().timeIntervalSince1970),
+                time: now,
                 services: peerContext.state.services,
                 ip: addr.ip,
                 port: peerListenPort
             )
             lock.lock()
-            if addressPool[routableAddr] == nil && addressPool.count < Self.maxAddressPool {
-                addressPool[routableAddr] = (host: ip, port: Int(peerListenPort), time: peerAddr.time)
+            // Always refresh the entry on a successful handshake so the
+            // stored agent/version/height/lastSeen reflect the most recent
+            // view of this peer. If we're at capacity with no existing
+            // entry for this address, skip — we can't evict here.
+            let existing = addressPool[routableAddr]
+            if existing != nil || addressPool.count < Self.maxAddressPool {
+                addressPool[routableAddr] = AddressPoolEntry(
+                    host: ip,
+                    port: Int(peerListenPort),
+                    time: max(now, existing?.time ?? 0),
+                    lastSeen: now,
+                    agent: peerContext.state.agent,
+                    version: peerContext.state.version,
+                    services: peerContext.state.services,
+                    height: peerContext.state.height
+                )
             }
             // Relay the peer's address to up to 2 other peers
             let targets = peers.values
@@ -1096,6 +1112,15 @@ extension PeerManager: ChainSyncDelegate {
         lock.lock()
         defer { lock.unlock() }
         return peers.values.filter { $0.state.isHandshaked }
+    }
+
+    /// Return a snapshot of the address pool. Used by the `getaddresspool`
+    /// RPC to expose every address we know about along with any handshake
+    /// metadata we've collected.
+    public func syncGetAddressPool() -> [AddressPoolEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(addressPool.values)
     }
 
     public func syncBanPeer(id: UInt64, reason: String) {

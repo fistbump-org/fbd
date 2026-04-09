@@ -9,6 +9,34 @@ import ExtCrypto
 import Protocol
 import Logging
 
+// MARK: - Address Pool Entry
+
+/// A single entry in the address pool.
+///
+/// Base addressing fields (`host`, `port`, `time`) come from addr-gossip and
+/// are always populated. The remaining fields are filled in when we actually
+/// handshake with a peer at this address, so they may be zero/empty for
+/// addresses we've only heard about but never connected to.
+public struct AddressPoolEntry: Codable, Sendable {
+    /// IPv4 address as dotted string.
+    public var host: String
+    /// Listening port.
+    public var port: Int
+    /// Timestamp (unix seconds) this address was last gossiped to us.
+    public var time: UInt64
+    /// Timestamp (unix seconds) of our last successful handshake with this
+    /// peer. Zero if we've never handshaked with them.
+    public var lastSeen: UInt64
+    /// User agent string reported at the last handshake. Empty if unknown.
+    public var agent: String
+    /// Protocol version reported at the last handshake. Zero if unknown.
+    public var version: UInt32
+    /// Service flags reported at the last handshake.
+    public var services: UInt32
+    /// Best block height reported at the last handshake.
+    public var height: UInt32
+}
+
 // MARK: - Address Pool & Outbound Connection Management
 
 extension PeerManager {
@@ -16,20 +44,41 @@ extension PeerManager {
     // MARK: - Address Persistence
 
     /// Load peer addresses from disk.
+    ///
+    /// New entries are stored as JSON-per-line. A legacy colon-separated
+    /// format (`host:port:time`) is still accepted for a one-time upgrade,
+    /// with the richer fields defaulted to zero.
     func loadAddressPool() {
         guard let dataDir = config.dataDir else { return }
         let path = dataDir + "/peers.dat"
         guard let data = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        let decoder = JSONDecoder()
         var loaded = 0
         for line in data.split(separator: "\n") {
-            let parts = line.split(separator: ":")
+            guard addressPool.count < Self.maxAddressPool else { break }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+
+            // Preferred: JSON lines.
+            if let lineData = trimmed.data(using: .utf8),
+               let entry = try? decoder.decode(AddressPoolEntry.self, from: lineData) {
+                let key = "\(entry.host):\(entry.port)"
+                addressPool[key] = entry
+                loaded += 1
+                continue
+            }
+
+            // Legacy: "host:port:time".
+            let parts = trimmed.split(separator: ":")
             guard parts.count >= 3,
                   let port = Int(parts[1]),
                   let time = UInt64(parts[2]) else { continue }
             let host = String(parts[0])
             let key = "\(host):\(port)"
-            guard addressPool.count < Self.maxAddressPool else { break }
-            addressPool[key] = (host: host, port: port, time: time)
+            addressPool[key] = AddressPoolEntry(
+                host: host, port: port, time: time,
+                lastSeen: 0, agent: "", version: 0, services: 0, height: 0
+            )
             loaded += 1
         }
         if loaded > 0 {
@@ -37,16 +86,19 @@ extension PeerManager {
         }
     }
 
-    /// Save peer addresses to disk atomically.
+    /// Save peer addresses to disk atomically as JSON-per-line.
     func saveAddressPool() {
         guard let dataDir = config.dataDir else { return }
         let path = dataDir + "/peers.dat"
         lock.lock()
         let entries = Array(addressPool.values)
         lock.unlock()
+        let encoder = JSONEncoder()
         var lines = ""
         for entry in entries {
-            lines += "\(entry.host):\(entry.port):\(entry.time)\n"
+            guard let data = try? encoder.encode(entry),
+                  let json = String(data: data, encoding: .utf8) else { continue }
+            lines += json + "\n"
         }
         let tmpPath = path + ".tmp"
         try? lines.write(toFile: tmpPath, atomically: false, encoding: .utf8)
@@ -467,7 +519,10 @@ extension PeerManager {
                 let subnetCount = addressPool.values
                     .lazy.filter { Self.subnetPrefix16($0.host) == subnet }.count
                 guard subnetCount < Self.maxPerSubnet16 else { continue }
-                addressPool[addrStr] = (host: ip, port: Int(port), time: addr.time)
+                addressPool[addrStr] = AddressPoolEntry(
+                    host: ip, port: Int(port), time: addr.time,
+                    lastSeen: 0, agent: "", version: 0, services: 0, height: 0
+                )
                 added += 1
             }
         }
@@ -509,7 +564,7 @@ extension PeerManager {
             } else {
                 ip = [UInt8](repeating: 0, count: 16)
             }
-            return NetAddress(time: entry.time, services: 0, ip: ip, port: UInt16(entry.port))
+            return NetAddress(time: entry.time, services: entry.services, ip: ip, port: UInt16(entry.port))
         }
         logger.debug("Serving addresses to peer", metadata: [
             "peer": "\(peer.id)",
