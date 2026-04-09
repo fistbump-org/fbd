@@ -35,6 +35,18 @@ public struct AddressPoolEntry: Codable, Sendable {
     public var services: UInt32
     /// Best block height reported at the last handshake.
     public var height: UInt32
+
+    public init(host: String, port: Int, time: UInt64, lastSeen: UInt64,
+                agent: String, version: UInt32, services: UInt32, height: UInt32) {
+        self.host = host
+        self.port = port
+        self.time = time
+        self.lastSeen = lastSeen
+        self.agent = agent
+        self.version = version
+        self.services = services
+        self.height = height
+    }
 }
 
 // MARK: - Address Pool & Outbound Connection Management

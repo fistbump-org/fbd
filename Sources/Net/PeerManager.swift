@@ -600,6 +600,32 @@ extension PeerManager: PeerMessageDelegate {
         let addrStr = (addr.ipv4String ?? "") + ":\(addr.port)"
         lock.lock()
         dialedAddresses.remove(addrStr)
+
+        // If the peer was handshaked, snapshot their final state into the
+        // address pool so the entry reflects the peer's current (not
+        // handshake-time) height/agent and a recent lastSeen. Without this,
+        // a peer that ran for hours and then disconnected would still show
+        // their handshake-time data forever.
+        if peerContext.state.isHandshaked,
+           let ip = addr.ipv4String,
+           !isPrivateIP(ip),
+           peerContext.state.listenPort > 0 {
+            let listenPort = Int(peerContext.state.listenPort)
+            let routableAddr = "\(ip):\(listenPort)"
+            let now = UInt64(Date().timeIntervalSince1970)
+            let existing = addressPool[routableAddr]
+            addressPool[routableAddr] = AddressPoolEntry(
+                host: ip,
+                port: listenPort,
+                time: max(existing?.time ?? 0, now),
+                lastSeen: now,
+                agent: peerContext.state.agent,
+                version: peerContext.state.version,
+                services: peerContext.state.services,
+                height: peerContext.state.height
+            )
+        }
+
         peers.removeValue(forKey: peerContext.id)
         let remaining = peers.count
         if remaining == 0 {

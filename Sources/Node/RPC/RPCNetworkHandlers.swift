@@ -66,8 +66,40 @@ extension FullNode {
 
         handlers["getaddresspool"] = { _ in
                 guard let pm = ctx.peerManager else { return .array([]) }
-                let entries = pm.syncGetAddressPool()
-                let result: [JSONValue] = entries.map { entry in
+                let poolEntries = pm.syncGetAddressPool()
+                let handshakedPeers = pm.syncGetHandshakedPeers()
+                let now = UInt64(Date().timeIntervalSince1970)
+
+                // Start from the stored pool (historical + gossip) keyed by
+                // routable address.
+                var merged: [String: AddressPoolEntry] = [:]
+                for entry in poolEntries {
+                    merged["\(entry.host):\(entry.port)"] = entry
+                }
+
+                // Overlay live state for currently-connected peers. Their
+                // state.height is kept fresh by ChainSync as headers/blocks
+                // arrive, so this reflects the peer's actual current tip
+                // instead of whatever they reported at handshake time.
+                // Also re-stamps lastSeen to now for connected peers.
+                for peer in handshakedPeers {
+                    let s = peer.state
+                    guard let ip = s.address.ipv4String, s.listenPort > 0 else { continue }
+                    let key = "\(ip):\(Int(s.listenPort))"
+                    let existing = merged[key]
+                    merged[key] = AddressPoolEntry(
+                        host: ip,
+                        port: Int(s.listenPort),
+                        time: max(existing?.time ?? 0, now),
+                        lastSeen: now,
+                        agent: s.agent,
+                        version: s.version,
+                        services: s.services,
+                        height: s.height
+                    )
+                }
+
+                let result: [JSONValue] = merged.values.map { entry in
                     return .object([
                         ("host", .string(entry.host)),
                         ("port", .int(Int64(entry.port))),
