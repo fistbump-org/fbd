@@ -555,6 +555,22 @@ public final class ChainSync: @unchecked Sendable {
         let blockItems = items.filter { $0.type == .block }
         guard !blockItems.isEmpty else { return }
 
+        // Bump peer.state.height for any announced block we already have in
+        // our chain. Without this, peer height only updates when we *fetch*
+        // a block from this specific peer — so peers stay tracked at stale
+        // heights whenever recent blocks were sourced from someone else,
+        // even though the peer has clearly told us they're at that tip.
+        var maxKnownHeight: UInt32 = 0
+        for item in blockItems {
+            if let entry = chain.getEntry(hash: item.hash) {
+                let h = UInt32(entry.height)
+                if h > maxKnownHeight { maxKnownHeight = h }
+            }
+        }
+        if maxKnownHeight > peer.state.height {
+            peer.state.height = maxKnownHeight
+        }
+
         // If any announced block is unknown, request headers to fill the gap
         let hasUnknown = blockItems.contains { !chain.has(hash: $0.hash) }
         guard hasUnknown else { return }
