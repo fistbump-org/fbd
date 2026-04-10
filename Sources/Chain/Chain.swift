@@ -271,12 +271,31 @@ public final class Chain: @unchecked Sendable {
             let entries = try store.loadEntries()
             byHash.reserveCapacity(entries.count + 1)
             byHeight.reserveCapacity(entries.count + 1)
+
+            // Detect gaps: only load entries up to the first discontinuity.
+            // A gap means a previous flush persisted entries past a hole left
+            // by an incomplete reorg. Truncate the store at the gap so the
+            // node re-syncs the missing range from peers.
+            var lastHeight = 0 // genesis
+            var truncateAt: Int?
             for entry in entries {
+                if entry.height != lastHeight + 1 {
+                    truncateAt = lastHeight
+                    break
+                }
                 byHash[entry.hash] = entry
                 byHeight[entry.height] = entry
+                lastHeight = entry.height
             }
-            if let last = entries.last {
-                _tip = last
+
+            if let truncateAt = truncateAt {
+                // Truncate the store to remove everything after the gap
+                try store.truncateToHeight(truncateAt)
+                FileHandle.standardError.write(Data("[Chain] Detected gap in entry store after height \(truncateAt), truncated (will re-sync)\n".utf8))
+            }
+
+            if let tip = byHeight[lastHeight], lastHeight > 0 {
+                _tip = tip
             }
             persistedHeight = _tip.height
         }
@@ -622,6 +641,22 @@ public final class Chain: @unchecked Sendable {
             throw ChainError.validationFailed("cannot find fork point")
         }
 
+        // Pre-verify: walk the new fork chain before modifying any state.
+        // Every entry should be in byHash (chain.add ensures this). If the
+        // walk can't reach the fork point, the index is corrupted — abort
+        // instead of leaving byHeight with gaps that poison difficulty checks.
+        var newChainEntries: [ChainEntry] = []
+        var current = newTip
+        while current.height > fork.height {
+            newChainEntries.append(current)
+            guard let prev = byHash[current.prevBlock] else {
+                throw ChainError.validationFailed(
+                    "reorg walk broken: missing parent for height \(current.height) in byHash"
+                )
+            }
+            current = prev
+        }
+
         // Disconnect old chain's UTXO/name state (if full validation is enabled)
         if coinDB != nil, blockStore != nil {
             try _disconnectTo(height: fork.height, notifications: &disconnectNotifications)
@@ -632,19 +667,9 @@ public final class Chain: @unchecked Sendable {
             byHeight.removeValue(forKey: h)
         }
 
-        // Add new chain entries to byHeight (walk from newTip back to fork).
-        // Every entry in byHash should have its parent in byHash (chain.add
-        // enforces this), so the walk should always complete.
-        var current = newTip
-        while current.height > fork.height {
-            byHeight[current.height] = current
-            guard let prev = byHash[current.prevBlock] else {
-                // Should be unreachable. If it happens, byHeight has gaps
-                // above fork.height — tip is reset to fork below so the
-                // next sync can rebuild the chain cleanly.
-                break
-            }
-            current = prev
+        // Apply new chain entries (walk was already verified above)
+        for entry in newChainEntries {
+            byHeight[entry.height] = entry
         }
 
         // Clear BIP9 state cache on reorg (states may change)
@@ -889,14 +914,19 @@ public final class Chain: @unchecked Sendable {
 
         var entries: [ChainEntry] = []
         for h in (persistedHeight + 1)..._tip.height {
-            guard let entry = byHeight[h] else { continue }
+            guard let entry = byHeight[h] else {
+                // Gap detected — stop here to avoid persisting a discontinuous
+                // chain. Entries up to the gap are flushed; the rest will be
+                // written on the next flush once the gap is filled.
+                break
+            }
             entries.append(entry)
         }
 
         guard !entries.isEmpty else { return }
 
         try store.appendEntries(entries)
-        persistedHeight = _tip.height
+        persistedHeight = persistedHeight + entries.count
     }
 
     /// Flush unpersisted chain entries to the store.
