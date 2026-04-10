@@ -121,6 +121,7 @@ public final class PeerManager: @unchecked Sendable {
     private var mempoolExpiryTask: Task<Void, Never>?
     private var addressSaveTask: Task<Void, Never>?
     private var refillTask: Task<Void, Never>?
+    private var tipGossipTask: Task<Void, Never>?
 
     /// Create a PeerManager.
     ///
@@ -323,6 +324,18 @@ public final class PeerManager: @unchecked Sendable {
                 }
             }
         }
+
+        // Tip gossip every 30 seconds: push our current tip header to every
+        // handshaked peer so their peer.state.height for us stays fresh
+        // without depending on push-relay of new blocks working correctly.
+        // The receiving peer processes this through its existing onHeaders
+        // path; the duplicate-header branch updates peer.state.height.
+        tipGossipTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                self?.broadcastCurrentTip()
+            }
+        }
     }
 
     /// Stop periodic tasks.
@@ -337,6 +350,29 @@ public final class PeerManager: @unchecked Sendable {
         addressSaveTask = nil
         refillTask?.cancel()
         refillTask = nil
+        tipGossipTask?.cancel()
+        tipGossipTask = nil
+    }
+
+    /// Broadcast the current chain tip as a single-header HeadersPacket to
+    /// every handshaked peer. Called by the tip-gossip timer so peers can
+    /// keep their view of our height fresh without relying on push-relay of
+    /// new blocks. The receiving peer's `onHeaders` handler hits the
+    /// duplicate-header path and updates peer.state.height accordingly.
+    private func broadcastCurrentTip() {
+        guard let chain = chain else { return }
+        let tipHeight = chain.tip.height
+        guard let tipBlock = try? chain.getBlock(height: tipHeight) else { return }
+
+        lock.lock()
+        let targets = Array(peers.values.filter { $0.state.isHandshaked })
+        lock.unlock()
+        guard !targets.isEmpty else { return }
+
+        let pkt = HeadersPacket(items: [tipBlock.header], proofs: [tipBlock.balloonProof])
+        for peer in targets {
+            peer.send(pkt)
+        }
     }
 
     /// Gracefully shut down the peer manager.
