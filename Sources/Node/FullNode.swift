@@ -927,7 +927,19 @@ public final class FullNode: Sendable {
             writer.enqueue(Array("data: \(json)\n\n".utf8))
         }
 
+        // Send a periodic SSE comment to prevent TCP idle timeouts and
+        // WebKit connection culling (macOS App Nap, background tabs).
+        // EventSource ignores comment lines per the SSE spec.
+        let heartbeatTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30s
+                guard writer.isAlive else { break }
+                writer.enqueue(Array(": heartbeat\n\n".utf8))
+            }
+        }
+
         defer {
+            heartbeatTask.cancel()
             ctx.unsubscribeEvents(subId)
             writer.isAlive = false
         }
