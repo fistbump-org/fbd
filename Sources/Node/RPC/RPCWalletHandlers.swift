@@ -532,16 +532,34 @@ extension FullNode {
 
                 let nameParams = NameParams.params(for: network)
 
-                // Join all params as strings, split by comma
-                let raw = rest.map { v -> String in
+                // Flatten params into a single string the segment-by-comma /
+                // arg-by-space parser below can chew on. Anything that
+                // arrives as a JSON array gets joined back with commas and
+                // suffixed with a trailing comma so the array boundary is
+                // preserved in the flattened raw string.
+                //
+                // This matters because `fbdctl`'s `autoDetect` will turn
+                // any shell token containing a comma (e.g. `10.5,` from a
+                // command like `sendmany none <addr> 10.5, none <addr2>
+                // 20.0`) into a single-element JSON array `["10.5"]` on
+                // the wire — that's intended for the xpub/pstx-list cases
+                // but it breaks `sendmany`'s `<value>,` segment-boundary
+                // syntax. Without the trailing-comma re-emission here, the
+                // array case would lose the comma, the join-then-split
+                // would treat all four payments as one segment, and only
+                // the first would be processed.
+                func paramToString(_ v: JSONValue) -> String {
                     switch v {
                     case .string(let s): return s
                     case .int(let n): return String(n)
                     case .double(let d): return String(d)
                     case .bool(let b): return b ? "true" : "false"
+                    case .array(let xs):
+                        return xs.map(paramToString).joined(separator: ",") + ","
                     default: return ""
                     }
-                }.joined(separator: " ")
+                }
+                let raw = rest.map(paramToString).joined(separator: " ")
 
                 guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
                     throw RPCError.invalidParams("expected: sendmany <action> <args>, <action> <args>, ...")

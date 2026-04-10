@@ -224,9 +224,20 @@ struct FBDCtl: AsyncParsableCommand {
                 return json
             }
         }
-        // Comma-separated values become a JSON array (for xpubs, pstx hex, etc.)
+        // Comma-separated values become a JSON array (for xpubs, pstx hex,
+        // etc.) — but ONLY if the comma is actually separating two or more
+        // things. A shell token like `10.5,` (number with trailing comma,
+        // common in `sendmany none <addr> 10.5, none <addr2> 20.0` style
+        // commands) splits to a single non-empty piece, which means the
+        // user clearly typed it as a number-with-segment-separator, not a
+        // list. Pass it through as a string with the comma intact so the
+        // server-side parser can still see the segment boundary.
         if value.contains(",") {
-            return value.split(separator: ",").map { String($0) }
+            let pieces = value.split(separator: ",").map { String($0) }
+            let nonEmpty = pieces.filter { !$0.isEmpty }
+            if nonEmpty.count >= 2 {
+                return pieces
+            }
         }
         return value
     }
