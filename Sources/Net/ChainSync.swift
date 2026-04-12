@@ -300,9 +300,13 @@ public final class ChainSync: @unchecked Sendable {
                     orphanRetries = 0 // Fresh sync cycle
                 }
                 break
-            } catch HeaderError.duplicateHeader {
-                // Duplicate header (locator overlap) — skip and continue
-                // processing remaining headers which may be new.
+            } catch HeaderError.duplicateHeader(let existing) {
+                // Duplicate header (locator overlap or tip gossip) — update
+                // the peer's height so the explorer shows fresh values, then
+                // continue processing remaining headers which may be new.
+                if UInt32(existing.height) > peer.state.height {
+                    peer.state.height = UInt32(existing.height)
+                }
                 continue
             } catch {
                 logger.warning("Invalid header from sync peer", metadata: [
