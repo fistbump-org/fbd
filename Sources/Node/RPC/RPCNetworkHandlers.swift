@@ -42,6 +42,7 @@ extension FullNode {
                     var names: [JSONValue] = []
                     if state.services & 1 != 0 { names.append(.string("NETWORK")) }
                     if state.services & 2 != 0 { names.append(.string("BLOOM")) }
+                    if state.services & 4 != 0 { names.append(.string("TIPGOSSIP")) }
 
                     return .object([
                         ("id", .int(Int64(peer.id))),
