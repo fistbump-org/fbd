@@ -56,7 +56,7 @@ public final class FullNode: Sendable {
     /// The node's version string (semver only, for CLI --version).
     public static let version = Constants.version
 
-    /// Full version with build hash, e.g. "0.1.0 (abc1234)".
+    /// Full version with build hash, e.g. "X.Y.Z (abc1234)".
     public static let fullVersion = Constants.fullVersion
 
     /// Build the user agent string, optionally with a custom suffix.

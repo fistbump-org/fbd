@@ -76,7 +76,7 @@ struct FBD: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "Connect ONLY to these peers (no DNS seeds).")
     var nodes: [String] = []
 
-    @Option(name: .long, help: "Custom user agent suffix (e.g. /fbd:0.1.0/YourName/).")
+    @Option(name: .long, help: "Custom user agent suffix (e.g. /fbd:X.Y.Z/YourName/).")
     var agent: String?
 
     // MARK: - RPC

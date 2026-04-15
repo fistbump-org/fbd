@@ -401,14 +401,14 @@ final class RPCMethodsTests: XCTestCase {
     func testGetNetworkInfo() {
         let result = RPCMethods.getNetworkInfo(
             version: 3,
-            subversion: "/fbd:0.1.0/",
+            subversion: "/fbd:test/",
             protocolversion: 3,
             connections: 8
         )
         if case .object(let pairs) = result {
             let dict = Dictionary(pairs, uniquingKeysWith: { _, last in last })
             XCTAssertEqual(dict["connections"], .int(8))
-            XCTAssertEqual(dict["subversion"], .string("/fbd:0.1.0/"))
+            XCTAssertEqual(dict["subversion"], .string("/fbd:test/"))
         } else {
             XCTFail("Expected object")
         }

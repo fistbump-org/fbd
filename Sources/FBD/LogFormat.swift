@@ -4,7 +4,7 @@ import Node
 
 /// Custom log handler that produces clean, single-letter-level output:
 ///
-///     I) [2026-02-24T02:13:10-05:00] node | Initializing fbd network=main version=0.1.0
+///     I) [2026-02-24T02:13:10-05:00] node | Initializing fbd network=main version=X.Y.Z
 ///
 struct FBDLogHandler: LogHandler {
     var logLevel: Logger.Level

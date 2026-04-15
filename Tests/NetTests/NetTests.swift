@@ -136,7 +136,7 @@ final class PacketTests: XCTestCase {
             time: 1000,
             remote: NetAddress(time: 500, services: 1, port: 32867),
             nonce: [UInt8](repeating: 0xAA, count: 8),
-            agent: "/fbd:0.1.0/",
+            agent: "/fbd:test/",
             height: 100,
             noRelay: true
         )
@@ -148,7 +148,7 @@ final class PacketTests: XCTestCase {
         XCTAssertEqual(decoded.services, 1)
         XCTAssertEqual(decoded.time, 1000)
         XCTAssertEqual(decoded.nonce, [UInt8](repeating: 0xAA, count: 8))
-        XCTAssertEqual(decoded.agent, "/fbd:0.1.0/")
+        XCTAssertEqual(decoded.agent, "/fbd:test/")
         XCTAssertEqual(decoded.height, 100)
         XCTAssertTrue(decoded.noRelay)
     }

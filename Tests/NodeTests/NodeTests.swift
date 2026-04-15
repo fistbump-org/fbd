@@ -158,12 +158,8 @@ final class NodeErrorTests: XCTestCase {
 
 final class FullNodeTests: XCTestCase {
 
-    func testNodeVersion() {
-        XCTAssertEqual(FullNode.version, "0.1.0")
-    }
-
     func testNodeUserAgent() {
-        XCTAssertEqual(FullNode.userAgent(), "/fbd:0.1.0/")
+        XCTAssertEqual(FullNode.userAgent(), "/fbd:\(FullNode.version)/")
     }
 
     func testNodeInitialize() throws {
@@ -204,7 +200,7 @@ final class FullNodeTests: XCTestCase {
     // MARK: - Agent Validation
 
     func testUserAgentWithSuffix() {
-        XCTAssertEqual(FullNode.userAgent(suffix: "MyNode"), "/fbd:0.1.0/MyNode/")
+        XCTAssertEqual(FullNode.userAgent(suffix: "MyNode"), "/fbd:\(FullNode.version)/MyNode/")
     }
 
     func testValidAgentAccepted() throws {
