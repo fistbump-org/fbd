@@ -1490,4 +1490,443 @@ final class CovenantProcessorTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Auction Cycle Value-Flow
+    //
+    // Scenario under test:
+    //   BID locks 10_000 (lockup), committing to trueBid = 1_000 via a blind.
+    //   Expected (per auction spec): winner pays regPrice and the remaining
+    //   lockup comes back at REGISTER; loser gets the full lockup back at REDEEM.
+    //
+    // These tests document the CURRENT behaviour at each stage so we can see
+    // which step (if any) deviates from the spec.
+
+    func testAuctionCycle_reveal_releasesLockupMinusTrueBidAsChange() throws {
+        let db = makeNameDB()
+        let chain = try makeChain()
+        let name = "flowreveal"
+        let nh = nameHash(for: name)
+        let openHeight = 10
+        let revealHeight = openHeight + nameParams.openPeriod + nameParams.biddingPeriod
+
+        var ns = NameState(nameHash: nh, name: Array(name.utf8))
+        ns.height = openHeight
+        ns.renewal = openHeight
+        db.putNameState(nh, ns)
+        XCTAssertEqual(ns.state(at: revealHeight, params: nameParams), .reveal)
+
+        let lockup: UInt64 = 10_000
+        let trueBid: UInt64 = 1_000
+
+        let nonce = BidNonce(unchecked: [UInt8](repeating: 0xAB, count: 32))
+        let blind = try BlindBid.blind(value: trueBid, nonce: nonce)
+        let bidCov = CovenantData.makeBid(
+            nameHash: nh, startHeight: openHeight,
+            name: Array(name.utf8), blind: blind
+        )
+        let bidOp = outpoint(0xB0, 0)
+        let revealCov = CovenantData.makeReveal(
+            nameHash: nh, startHeight: openHeight, nonce: nonce
+        )
+
+        // BID input (10_000) -> REVEAL output (1_000) + .none change (9_000).
+        // If the spec were "lockup stays locked until REGISTER/REDEEM", this
+        // tx would be rejected — the REVEAL should be forced to value=lockup.
+        let revealTx = Transaction(
+            inputs: [Input(prevout: bidOp)],
+            outputs: [
+                Output(value: trueBid, address: .null, covenant: revealCov),
+                Output(value: lockup - trueBid, address: .null, covenant: .none),
+            ]
+        )
+        let view = viewWithCoin(at: bidOp, value: lockup, covenant: bidCov)
+
+        try CovenantProcessor.processCovenants(
+            tx: revealTx, txIndex: 0, coinView: view, nameDB: db,
+            height: revealHeight, network: network, nameParams: nameParams,
+            chain: chain, consensusParams: ConsensusParams.params(for: .regtest)
+        )
+
+        // CURRENT: REVEAL accepts trueBid < lockup. The (lockup - trueBid)
+        // difference is spendable on the REVEAL tx as an ordinary .none change
+        // output — the lockup is NOT preserved past REVEAL.
+        let after = try db.getNameState(nh)
+        XCTAssertEqual(after?.highest, Int64(trueBid),
+            "ns.highest tracks trueBid (output.value), not the original lockup")
+    }
+
+    func testAuctionCycle_redeem_refundsOnlyTrueBidNotLockup() throws {
+        let db = makeNameDB()
+        let chain = try makeChain()
+        let name = "flowredeem"
+        let nh = nameHash(for: name)
+        let openHeight = 10
+        let closedHeight = openHeight + nameParams.openPeriod + nameParams.biddingPeriod + nameParams.revealPeriod
+
+        // Loser scenario: someone else is the winner/owner.
+        var ns = NameState(nameHash: nh, name: Array(name.utf8))
+        ns.height = openHeight
+        ns.renewal = openHeight
+        ns.owner = NameState.Outpoint(hash: txHash(0xF0).bytes, index: 0)
+        ns.highest = 5_000
+        ns.value = 1_000
+        db.putNameState(nh, ns)
+        XCTAssertEqual(ns.state(at: closedHeight, params: nameParams), .closed)
+
+        // After REVEAL, the loser's UTXO has value = trueBid = 1_000.
+        // (The other 9_000 of the original 10_000 lockup was already taken
+        // as change during REVEAL; see testAuctionCycle_reveal_releasesLockupMinusTrueBidAsChange.)
+        let trueBid: UInt64 = 1_000
+        let loserRevealOp = outpoint(0xB1, 0)
+        let loserRevealCov = CovenantData.makeReveal(
+            nameHash: nh, startHeight: openHeight, nonce: .zero
+        )
+        let redeemCov = CovenantData.makeRedeem(nameHash: nh, startHeight: openHeight)
+
+        // REDEEM output can be at most the REVEAL input value = trueBid = 1_000.
+        // There is no way to refund the original 10_000 lockup at REDEEM —
+        // the coins simply aren't here to spend.
+        let redeemTx = simpleTx(input: loserRevealOp, outputValue: trueBid, covenant: redeemCov)
+        let view = viewWithCoin(at: loserRevealOp, value: trueBid, covenant: loserRevealCov)
+
+        try CovenantProcessor.processCovenants(
+            tx: redeemTx, txIndex: 0, coinView: view, nameDB: db,
+            height: closedHeight, network: network, nameParams: nameParams,
+            chain: chain, consensusParams: ConsensusParams.params(for: .regtest)
+        )
+        // CURRENT: loser's total refund = 9_000 (at REVEAL) + 1_000 (at REDEEM) = 10_000.
+        // The refund happens in TWO stages, not one — 10_000 does NOT arrive at REDEEM.
+    }
+
+    func testAuctionCycle_register_soleBidderPaysZeroAndOnlyTrueBidIsChange() throws {
+        let db = makeNameDB()
+        let chain = try makeChain()
+        let name = "flowregister"
+        let nh = nameHash(for: name)
+        // openHeight=0 + height=5 < renewalMaturity(10) lets the zeroed
+        // blockHash renewal pass; `registered=true` forces .closed early.
+        let openHeight = 0
+        let height = 5
+
+        let trueBid: UInt64 = 1_000
+        let ownerOp = outpoint(0xB2, 0)
+
+        var ns = NameState(nameHash: nh, name: Array(name.utf8))
+        ns.height = openHeight
+        ns.renewal = openHeight
+        ns.registered = true
+        ns.owner = NameState.Outpoint(hash: ownerOp.hash.bytes, index: Int(ownerOp.index))
+        ns.highest = Int64(trueBid)
+        ns.value = 0  // sole bidder: no second-price
+        db.putNameState(nh, ns)
+        XCTAssertEqual(ns.state(at: height, params: nameParams), .closed)
+
+        // Finding 1: on regtest, minimumBid returns 0 (numerators are 0).
+        // Combined with ns.value=0 → regPrice = max(0, 0) = 0.
+        let regMinBid = nameParams.minimumBid(atHeight: height, rawName: Array(name.utf8))
+        XCTAssertEqual(regMinBid, 0,
+            "regtest tldMinBidNumerator=0 → minimumBid=0 → sole bidders pay nothing")
+
+        let revealCov = CovenantData.makeReveal(
+            nameHash: nh, startHeight: openHeight, nonce: .zero
+        )
+        let registerCov = CovenantData.makeRegister(
+            nameHash: nh, startHeight: openHeight,
+            resource: [], blockHash: [UInt8](repeating: 0, count: 32)
+        )
+
+        // REGISTER input is the winner's REVEAL UTXO = trueBid = 1_000.
+        // REGISTER output value must be 0. regPrice = 0, so the entire 1_000
+        // comes back as .none change — that's the ONLY change at REGISTER.
+        // There is no way to produce 9_000 of change here — the coins aren't
+        // in the input set (they were released at REVEAL).
+        let registerTx = Transaction(
+            inputs: [Input(prevout: ownerOp)],
+            outputs: [
+                Output(value: 0, address: .null, covenant: registerCov),
+                Output(value: trueBid, address: .null, covenant: .none),
+            ]
+        )
+        let view = viewWithCoin(at: ownerOp, value: trueBid, covenant: revealCov)
+
+        try CovenantProcessor.processCovenants(
+            tx: registerTx, txIndex: 0, coinView: view, nameDB: db,
+            height: height, network: network, nameParams: nameParams,
+            chain: chain, consensusParams: ConsensusParams.params(for: .regtest)
+        )
+
+        // CURRENT:
+        //   - regPrice = 0 (regtest minBid=0, sole bidder's ns.value=0) → FREE NAME
+        //   - Max change at REGISTER = REVEAL input value = 1_000 (trueBid),
+        //     NOT 9_000 (lockup - trueBid) and NOT 10_000 (full lockup).
+        let after = try db.getNameState(nh)
+        XCTAssertTrue(after?.registered ?? false)
+        XCTAssertEqual(after?.value, 0,
+            "Sole bidder on regtest paid 0 — name was free")
+    }
+
+    // MARK: - Auction Cycle Value-Flow (MAINNET params)
+    //
+    // Same three stages as the regtest tests above, but using
+    // NameParams.mainnet / ConsensusParams.mainnet / NetworkType.main
+    // to confirm that the behaviour described by the user matches
+    // what a real mainnet node will do.
+
+    private func makeMainnetChain() throws -> Chain {
+        try Chain(network: .main)
+    }
+
+    func testMainnetAuctionCycle_reveal_releasesLockupMinusTrueBidAsChange() throws {
+        let db = makeNameDB()
+        let chain = try makeMainnetChain()
+        let mainParams = NameParams.mainnet
+        let mainNetwork = NetworkType.main
+        let mainCP = ConsensusParams.params(for: .main)
+
+        // Post-auctionStart (10_080), pre-first-halving.
+        let name = "mainflowreveal"
+        let nh = nameHash(for: name)
+        let openHeight = 10_100
+        let revealHeight = openHeight + mainParams.openPeriod + mainParams.biddingPeriod
+
+        var ns = NameState(nameHash: nh, name: Array(name.utf8))
+        ns.height = openHeight
+        ns.renewal = openHeight
+        db.putNameState(nh, ns)
+        XCTAssertEqual(ns.state(at: revealHeight, params: mainParams), .reveal)
+
+        // User's scenario: 10k lockup, 1k trueBid.
+        // (We don't process BID here, so BID-time minBid isn't enforced —
+        // we're isolating the REVEAL stage's value-flow behaviour.)
+        let lockup: UInt64 = 10_000
+        let trueBid: UInt64 = 1_000
+
+        let nonce = BidNonce(unchecked: [UInt8](repeating: 0xAB, count: 32))
+        let blind = try BlindBid.blind(value: trueBid, nonce: nonce)
+        let bidCov = CovenantData.makeBid(
+            nameHash: nh, startHeight: openHeight,
+            name: Array(name.utf8), blind: blind
+        )
+        let bidOp = outpoint(0xC0, 0)
+        let revealCov = CovenantData.makeReveal(
+            nameHash: nh, startHeight: openHeight, nonce: nonce
+        )
+
+        // BID input (10_000) -> REVEAL (1_000) + .none change (9_000).
+        let revealTx = Transaction(
+            inputs: [Input(prevout: bidOp)],
+            outputs: [
+                Output(value: trueBid, address: .null, covenant: revealCov),
+                Output(value: lockup - trueBid, address: .null, covenant: .none),
+            ]
+        )
+        let view = viewWithCoin(at: bidOp, value: lockup, covenant: bidCov)
+
+        try CovenantProcessor.processCovenants(
+            tx: revealTx, txIndex: 0, coinView: view, nameDB: db,
+            height: revealHeight, network: mainNetwork, nameParams: mainParams,
+            chain: chain, consensusParams: mainCP
+        )
+
+        let after = try db.getNameState(nh)
+        XCTAssertEqual(after?.highest, Int64(trueBid),
+            "MAINNET: REVEAL tracks trueBid (1_000), not lockup (10_000). The 9_000 exits as change here, not at REGISTER.")
+    }
+
+    func testMainnetAuctionCycle_redeem_refundsOnlyTrueBidNotLockup() throws {
+        let db = makeNameDB()
+        let chain = try makeMainnetChain()
+        let mainParams = NameParams.mainnet
+        let mainNetwork = NetworkType.main
+        let mainCP = ConsensusParams.params(for: .main)
+
+        let name = "mainflowredeem"
+        let nh = nameHash(for: name)
+        let openHeight = 10_100
+        let closedHeight = openHeight + mainParams.openPeriod + mainParams.biddingPeriod + mainParams.revealPeriod
+
+        var ns = NameState(nameHash: nh, name: Array(name.utf8))
+        ns.height = openHeight
+        ns.renewal = openHeight
+        ns.owner = NameState.Outpoint(hash: txHash(0xF0).bytes, index: 0) // someone else won
+        ns.highest = 5_000
+        ns.value = 1_000
+        db.putNameState(nh, ns)
+        XCTAssertEqual(ns.state(at: closedHeight, params: mainParams), .closed)
+
+        // Loser's REVEAL UTXO carries only their trueBid (1_000), not the
+        // original lockup (10_000). The rest was taken as REVEAL change.
+        let trueBid: UInt64 = 1_000
+        let loserRevealOp = outpoint(0xC1, 0)
+        let loserRevealCov = CovenantData.makeReveal(
+            nameHash: nh, startHeight: openHeight, nonce: .zero
+        )
+        let redeemCov = CovenantData.makeRedeem(nameHash: nh, startHeight: openHeight)
+        let redeemTx = simpleTx(input: loserRevealOp, outputValue: trueBid, covenant: redeemCov)
+        let view = viewWithCoin(at: loserRevealOp, value: trueBid, covenant: loserRevealCov)
+
+        try CovenantProcessor.processCovenants(
+            tx: redeemTx, txIndex: 0, coinView: view, nameDB: db,
+            height: closedHeight, network: mainNetwork, nameParams: mainParams,
+            chain: chain, consensusParams: mainCP
+        )
+        // MAINNET: loser's total refund = 9_000 at REVEAL + 1_000 at REDEEM.
+        // The user's expectation ("10_000 back at REDEEM") is NOT what happens.
+    }
+
+    func testMainnetAuctionCycle_register_soleBidderPaysMinBid() throws {
+        let db = makeNameDB()
+        let chain = try makeMainnetChain()
+        let mainParams = NameParams.mainnet
+        let mainNetwork = NetworkType.main
+        let mainCP = ConsensusParams.params(for: .main)
+
+        // TLD. On mainnet: tldMinBidNumerator=20, denom=1 → minBid = 20 * reward.
+        // At height < halvingInterval (1_051_200), reward = 500 FBC = 500_000_000 bumps.
+        // So minBid = 10_000 FBC = 10_000_000_000 bumps.
+        //
+        // For REGISTER to actually be payable out of the REVEAL input under
+        // current rules, trueBid must cover regPrice — scale the example up
+        // (20k FBC trueBid, 30k FBC lockup) so the math works.
+        let name = "mainflowregister"
+        let nh = nameHash(for: name)
+        let openHeight = 10_100
+        let height = 10_500  // < renewalMaturity (21_600), zeroed blockHash passes
+        //                      and < revealEnd so `registered=true` forces .closed.
+
+        let trueBid: UInt64 = 20_000_000_000  // 20,000 FBC
+        let lockup:  UInt64 = 30_000_000_000  // 30,000 FBC ("blind" difference: 10,000 FBC)
+        XCTAssertEqual(lockup - trueBid, 10_000_000_000,
+            "The 10,000 FBC difference was already released as REVEAL change, not reaching this REGISTER.")
+
+        let ownerOp = outpoint(0xC2, 0)
+
+        var ns = NameState(nameHash: nh, name: Array(name.utf8))
+        ns.height = openHeight
+        ns.renewal = openHeight
+        ns.registered = true
+        ns.owner = NameState.Outpoint(hash: ownerOp.hash.bytes, index: Int(ownerOp.index))
+        ns.highest = Int64(trueBid)
+        ns.value = 0  // sole bidder
+        db.putNameState(nh, ns)
+        XCTAssertEqual(ns.state(at: height, params: mainParams), .closed)
+
+        // Confirm mainnet minBid is 10_000 FBC for a TLD at this height.
+        let regMinBid = mainParams.minimumBid(atHeight: height, rawName: Array(name.utf8))
+        XCTAssertEqual(regMinBid, 10_000_000_000,
+            "MAINNET: TLD minimumBid = 20 * 500 FBC = 10,000 FBC")
+
+        // Sole bidder: regPrice = max(0, minBid) = minBid = 10,000 FBC.
+        //   burnShare = 50% = 5,000 FBC  → .null
+        //   devShare  = 50% = 5,000 FBC  → devFund
+        // Change to winner = trueBid - regPrice = 10,000 FBC.
+        let regPrice: UInt64 = 10_000_000_000
+        let burnShare: UInt64 = 5_000_000_000
+        let devShare: UInt64 = 5_000_000_000
+        let winnerChange: UInt64 = trueBid - regPrice   // 10,000 FBC
+        let devFundAddr = Address(unchecked: mainCP.devFundVersion, hash: mainCP.devFundAddress)
+
+        let revealCov = CovenantData.makeReveal(
+            nameHash: nh, startHeight: openHeight, nonce: .zero
+        )
+        let registerCov = CovenantData.makeRegister(
+            nameHash: nh, startHeight: openHeight,
+            resource: [], blockHash: [UInt8](repeating: 0, count: 32)
+        )
+
+        let registerTx = Transaction(
+            inputs: [Input(prevout: ownerOp)],
+            outputs: [
+                Output(value: 0, address: .null, covenant: registerCov),
+                Output(value: burnShare, address: .null, covenant: .none),
+                Output(value: devShare, address: devFundAddr, covenant: .none),
+                Output(value: winnerChange, address: .null, covenant: .none),
+            ]
+        )
+        let view = viewWithCoin(at: ownerOp, value: trueBid, covenant: revealCov)
+
+        try CovenantProcessor.processCovenants(
+            tx: registerTx, txIndex: 0, coinView: view, nameDB: db,
+            height: height, network: mainNetwork, nameParams: mainParams,
+            chain: chain, consensusParams: mainCP
+        )
+
+        // MAINNET confirmed behaviour:
+        //   ✓ Sole bidder pays minBid (10,000 FBC) — NOT free.
+        //   ✗ Winner's REGISTER change = trueBid - regPrice = 10,000 FBC.
+        //     User's spec says it should be lockup - regPrice = 20,000 FBC.
+        //     The missing 10,000 FBC already walked out at REVEAL as change.
+        //     Total returned to winner across the cycle:
+        //       10,000 (REVEAL change) + 10,000 (REGISTER change) = 20,000 FBC,
+        //     which equals lockup - regPrice — but split across two txs.
+        let after = try db.getNameState(nh)
+        XCTAssertTrue(after?.registered ?? false)
+        XCTAssertEqual(after?.value, Int64(regPrice),
+            "Sole bidder on mainnet pays minBid (10,000 FBC), confirming that side of the spec")
+    }
+
+    func testMainnetAuctionCycle_revealAccepts_trueBidBelowMinBid() throws {
+        // User's literal scenario: 10k lockup, 1k trueBid on mainnet.
+        // On mainnet TLD, minBid at BID time requires lockup >= 10,000 FBC,
+        // but trueBid is NEVER validated against minBid — only the blind-hash
+        // commitment. So a bidder can reveal a trueBid far below minBid as long
+        // as the blind matches. This test confirms that "gap".
+        let db = makeNameDB()
+        let chain = try makeMainnetChain()
+        let mainParams = NameParams.mainnet
+        let mainNetwork = NetworkType.main
+        let mainCP = ConsensusParams.params(for: .main)
+
+        let name = "mainlowreveal"
+        let nh = nameHash(for: name)
+        let openHeight = 10_100
+        let revealHeight = openHeight + mainParams.openPeriod + mainParams.biddingPeriod
+
+        var ns = NameState(nameHash: nh, name: Array(name.utf8))
+        ns.height = openHeight
+        ns.renewal = openHeight
+        db.putNameState(nh, ns)
+
+        // Lockup satisfies mainnet TLD BID minBid (10,000 FBC); trueBid is
+        // intentionally TINY (1 bump) — far below minBid.
+        let lockup: UInt64 = 10_000_000_000  // 10,000 FBC (matches minBid exactly)
+        let trueBid: UInt64 = 1
+
+        let nonce = BidNonce(unchecked: [UInt8](repeating: 0xCC, count: 32))
+        let blind = try BlindBid.blind(value: trueBid, nonce: nonce)
+        let bidCov = CovenantData.makeBid(
+            nameHash: nh, startHeight: openHeight,
+            name: Array(name.utf8), blind: blind
+        )
+        let bidOp = outpoint(0xC3, 0)
+        let revealCov = CovenantData.makeReveal(
+            nameHash: nh, startHeight: openHeight, nonce: nonce
+        )
+
+        let revealTx = Transaction(
+            inputs: [Input(prevout: bidOp)],
+            outputs: [
+                Output(value: trueBid, address: .null, covenant: revealCov),
+                Output(value: lockup - trueBid, address: .null, covenant: .none),
+            ]
+        )
+        let view = viewWithCoin(at: bidOp, value: lockup, covenant: bidCov)
+
+        // Processor accepts — no minBid check at REVEAL.
+        try CovenantProcessor.processCovenants(
+            tx: revealTx, txIndex: 0, coinView: view, nameDB: db,
+            height: revealHeight, network: mainNetwork, nameParams: mainParams,
+            chain: chain, consensusParams: mainCP
+        )
+
+        let after = try db.getNameState(nh)
+        XCTAssertEqual(after?.highest, 1,
+            "MAINNET: sole bidder reveals trueBid=1 bump. ns.highest=1, ns.value=0.")
+        // Follow-up: REGISTER for this name would require paying regPrice=10,000 FBC
+        // from a REVEAL input of only 1 bump — impossible unless the winner supplies
+        // extra inputs. So this sole bidder's REVEAL UTXO is effectively stuck
+        // (or forfeit) under the current design. Under the proposed fix
+        // (REVEAL preserves lockup), the 10,000 FBC is still in the REVEAL UTXO
+        // and fully covers regPrice.
+    }
 }

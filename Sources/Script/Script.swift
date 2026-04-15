@@ -217,6 +217,86 @@ public struct Script: Equatable, Sendable {
             && raw[24] == Opcode.OP_CHECKSIG.rawValue
     }
 
+    /// Build an HTLC (hash time-locked contract) witness script for atomic swaps.
+    ///
+    /// Two spend paths:
+    ///   - **Claim**: counterparty provides preimage `s` such that `SHA256(s) == hashlock`,
+    ///     plus a signature under `claimPubkey`.
+    ///   - **Refund**: originator waits until block height `locktime`, then signs under `refundPubkey`.
+    ///
+    /// Script layout:
+    /// ```
+    /// OP_IF
+    ///   OP_SHA256 <hashlock> OP_EQUALVERIFY <claimPubkey> OP_CHECKSIG
+    /// OP_ELSE
+    ///   <locktime> OP_CLTV OP_DROP <refundPubkey> OP_CHECKSIG
+    /// OP_ENDIF
+    /// ```
+    ///
+    /// The resulting script is suitable for a P2WSH output (commitment via SHA3-256).
+    /// See `swap/SPEC.md` for the full protocol.
+    ///
+    /// - Parameters:
+    ///   - hashlock: 32-byte SHA-256 of the preimage.
+    ///   - claimPubkey: 33-byte compressed secp256k1 pubkey for the claim path.
+    ///   - refundPubkey: 33-byte compressed secp256k1 pubkey for the refund path.
+    ///   - locktime: Absolute block height after which refund becomes valid (1...499_999_999).
+    public static func htlc(
+        hashlock: [UInt8],
+        claimPubkey: [UInt8],
+        refundPubkey: [UInt8],
+        locktime: UInt32
+    ) -> Script {
+        precondition(hashlock.count == 32, "hashlock must be 32 bytes")
+        precondition(claimPubkey.count == 33, "claim pubkey must be 33 bytes (compressed)")
+        precondition(refundPubkey.count == 33, "refund pubkey must be 33 bytes (compressed)")
+        precondition(locktime >= 1 && locktime < 500_000_000,
+                     "locktime must be a block height (< 500,000,000)")
+
+        return Script(building: [
+            .opcode(.OP_IF),
+                .opcode(.OP_SHA256),
+                .pushData(hashlock),
+                .opcode(.OP_EQUALVERIFY),
+                .pushData(claimPubkey),
+                .opcode(.OP_CHECKSIG),
+            .opcode(.OP_ELSE),
+                .pushData(ScriptNum.encode(Int64(locktime))),
+                .opcode(.OP_CHECKLOCKTIMEVERIFY),
+                .opcode(.OP_DROP),
+                .pushData(refundPubkey),
+                .opcode(.OP_CHECKSIG),
+            .opcode(.OP_ENDIF),
+        ])
+    }
+
+    /// Parse an HTLC script produced by `Script.htlc(...)` back into its parameters.
+    ///
+    /// Returns nil if the script does not match the exact template. Callers verifying
+    /// a counterparty-provided script MUST re-build from parameters and compare bytes,
+    /// rather than trusting this parser alone.
+    public var htlcParams: (hashlock: [UInt8], claimPubkey: [UInt8], refundPubkey: [UInt8], locktime: UInt32)? {
+        guard let insts = try? instructions(), insts.count == 13 else { return nil }
+
+        guard case .opcode(.OP_IF) = insts[0] else { return nil }
+        guard case .opcode(.OP_SHA256) = insts[1] else { return nil }
+        guard case .pushData(let h) = insts[2], h.count == 32 else { return nil }
+        guard case .opcode(.OP_EQUALVERIFY) = insts[3] else { return nil }
+        guard case .pushData(let claimPk) = insts[4], claimPk.count == 33 else { return nil }
+        guard case .opcode(.OP_CHECKSIG) = insts[5] else { return nil }
+        guard case .opcode(.OP_ELSE) = insts[6] else { return nil }
+        guard case .pushData(let ltBytes) = insts[7] else { return nil }
+        guard case .opcode(.OP_CHECKLOCKTIMEVERIFY) = insts[8] else { return nil }
+        guard case .opcode(.OP_DROP) = insts[9] else { return nil }
+        guard case .pushData(let refundPk) = insts[10], refundPk.count == 33 else { return nil }
+        guard case .opcode(.OP_CHECKSIG) = insts[11] else { return nil }
+        guard case .opcode(.OP_ENDIF) = insts[12] else { return nil }
+
+        guard let lt = try? ScriptNum.decode(ltBytes), lt >= 1, lt < 500_000_000 else { return nil }
+
+        return (hashlock: h, claimPubkey: claimPk, refundPubkey: refundPk, locktime: UInt32(lt))
+    }
+
     /// Count the number of signature operations in this script.
     public var sigops: Int {
         guard let insts = try? instructions() else { return 0 }

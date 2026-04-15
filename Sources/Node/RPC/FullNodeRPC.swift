@@ -30,6 +30,7 @@ extension FullNode {
         handlers.merge(networkRPCHandlers(ctx: ctx, network: network)) { _, new in new }
         handlers.merge(nameRPCHandlers(ctx: ctx, network: network, walletsDir: walletsDir)) { _, new in new }
         handlers.merge(walletRPCHandlers(ctx: ctx, network: network, walletsDir: walletsDir)) { _, new in new }
+        handlers.merge(htlcRPCHandlers(ctx: ctx, network: network)) { _, new in new }
         handlers.merge(miscRPCHandlers(ctx: ctx, network: network, walletsDir: walletsDir)) { _, new in new }
 
         return RPCDispatcher(handlers: handlers)
