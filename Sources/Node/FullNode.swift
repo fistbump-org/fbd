@@ -722,19 +722,16 @@ public final class FullNode: Sendable {
             peerManager: peerManager,
             logger: logger
         )
+        // Best-effort: iOS can't reliably bind 0.0.0.0 (Local Network
+        // permission, no background networking entitlement), and a failed
+        // inbound listener doesn't stop the node from being useful via
+        // outbound peers. Match brontide's policy and warn-and-continue.
         do {
             try p2pListener.start()
+            logger.info("P2P listening on \(config.host):\(config.effectivePort)", source: "Net")
         } catch {
-            logger.error("Cannot bind P2P on \(config.host):\(config.effectivePort) — \(Self.describeBindError(error))", source: "Net")
-            rpcServer.shutdown()
-            dnsServer.shutdown()
-            ctx.auctionIndex?.close()
-            coinDB.close()
-            for (_, wallet) in ctx.allWallets() { wallet.close() }
-            try? fm.removeItem(atPath: cookiePath)
-            throw NodeError.startupFailed("bind failed")
+            logger.warning("Cannot bind P2P on \(config.host):\(config.effectivePort) — \(Self.describeBindError(error)); continuing in outbound-only mode", source: "Net")
         }
-        logger.info("P2P listening on \(config.host):\(config.effectivePort)", source: "Net")
 
         // Start Brontide (encrypted P2P) listener
         let brontidePort = Int(config.network.brontidePort)
