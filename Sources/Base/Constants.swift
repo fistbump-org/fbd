@@ -3,7 +3,7 @@ public enum Constants {
     // MARK: - Version
 
     /// The fbd version string.
-    public static let version = "0.2.0"
+    public static let version = "0.3.0"
 
     /// The git commit hash at build time (short), set by BuildInfo.swift.
     /// Falls back to "unknown" if not built from a git repo.

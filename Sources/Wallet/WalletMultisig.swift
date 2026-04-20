@@ -751,6 +751,7 @@ extension WalletDB {
     /// - P2WSH inputs: find local keys by matching pubkeys, sign at correct positions.
     public func signTransaction(_ pstx: PartiallySignedTx) throws -> PartiallySignedTx {
         guard initialized else { throw WalletError.notInitialized }
+        guard walletType != .watchOnly else { throw WalletError.watchOnly }
         checkAutoLock()
         guard isUnlocked else { throw WalletError.walletLocked }
 

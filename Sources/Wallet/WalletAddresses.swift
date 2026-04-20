@@ -285,8 +285,9 @@ extension WalletDB {
     }
 
     func deriveAddresses(receive: Int, change: Int) throws {
-        // Use xpub for address derivation (works while locked)
-        let useXpub = isEncrypted
+        // Use xpub for address derivation (works while locked, and is the only
+        // option for watch-only wallets).
+        let useXpub = isEncrypted || walletType == .watchOnly
         var accountPriv: ExtendedPrivateKey?
         var accountPub: ExtendedPublicKey?
 

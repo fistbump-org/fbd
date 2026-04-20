@@ -403,6 +403,9 @@ public struct PartiallySignedTx: Sendable {
 public enum WalletType: UInt8, Sendable {
     case regular = 0
     case multisig = 1
+    /// Watch-only wallet: holds an xpub, no private keys. Cannot sign;
+    /// signing is delegated to an external signer (e.g. a hardware wallet).
+    case watchOnly = 2
 }
 
 /// LevelDB-backed wallet with HD key derivation and UTXO tracking.
@@ -584,6 +587,33 @@ public final class WalletDB {
         try put(db: metaDB, key: Array("initialized".utf8), value: [1])
     }
 
+    /// Import a watch-only wallet from an account-level xpub (m/44'/14159'/account').
+    ///
+    /// The wallet derives addresses and tracks UTXOs but holds no private key
+    /// material — signing must happen out-of-band (e.g. on a Ledger device) and
+    /// the signed PSTX submitted via `broadcasttx`.
+    ///
+    /// - Parameter xpub: Base58Check-encoded extended public key string.
+    public func importXpub(_ xpub: String) throws {
+        guard !initialized else {
+            throw WalletError.alreadyInitialized
+        }
+
+        let accountPub = try ExtendedPublicKey.deserialize(xpub)
+        storedAccountXpub = accountPub
+        walletType = .watchOnly
+
+        try put(db: metaDB, key: Array("accountXpub".utf8), value: Array(xpub.utf8))
+        try put(db: metaDB, key: Array("walletType".utf8), value: [WalletType.watchOnly.rawValue])
+        try put(db: metaDB, key: Array("height".utf8), value: intToBytes(-1))
+
+        // Derive initial addresses (uses xpub-only path).
+        try deriveAddresses(receive: lookahead, change: lookahead)
+
+        initialized = true
+        try put(db: metaDB, key: Array("initialized".utf8), value: [1])
+    }
+
     // MARK: - State Loading
 
     func loadState() throws {
@@ -708,6 +738,7 @@ public enum WalletError: Error, Sendable, LocalizedError {
     case wrongPassphrase
     case emptyPassphrase
     case invalidSignature(String)
+    case watchOnly
 
     public var errorDescription: String? {
         switch self {
@@ -732,6 +763,7 @@ public enum WalletError: Error, Sendable, LocalizedError {
         case .wrongPassphrase: return "Incorrect passphrase."
         case .emptyPassphrase: return "Passphrase must not be empty."
         case .invalidSignature(let msg): return "Invalid signature: \(msg)"
+        case .watchOnly: return "Wallet is watch-only — sign with the external signer (e.g. hardware wallet) and submit via broadcasttx."
         }
     }
 }

@@ -41,9 +41,12 @@ extension FullNode {
 
                 let importKey = params.count > 1 ? params[1].stringValue : nil
 
-                // Detect xpriv import vs mnemonic
+                // Detect import type by prefix.
                 let isXpriv = importKey?.hasPrefix("xprv") == true
-                if isXpriv {
+                let isXpub = importKey?.hasPrefix("xpub") == true
+                if isXpub {
+                    try wallet.importXpub(importKey!)
+                } else if isXpriv {
                     try wallet.importXpriv(importKey!)
                 } else {
                     _ = try wallet.create(mnemonic: importKey)
@@ -61,7 +64,10 @@ extension FullNode {
                     ("name", .string(name)),
                     ("addresses", .int(Int64(wallet.addressCount))),
                 ]
-                if isXpriv {
+                if isXpub {
+                    result.insert(("imported", .string("xpub")), at: 1)
+                    result.insert(("watchOnly", .bool(true)), at: 2)
+                } else if isXpriv {
                     result.insert(("imported", .string("xpriv")), at: 1)
                 } else if importKey != nil {
                     result.insert(("imported", .string("mnemonic")), at: 1)
@@ -79,10 +85,17 @@ extension FullNode {
                 let bal = try wallet.getDetailedBalance()
                 let spendable = bal.unconfirmed - bal.lockedUnconfirmed - bal.immatureCoinbase
                 let primary = wallet.primaryAddress?.toBech32(network: network)
+                let typeName: String = {
+                    switch wallet.walletType {
+                    case .multisig:  return "multisig"
+                    case .watchOnly: return "watchOnly"
+                    case .regular:   return "regular"
+                    }
+                }()
                 var result: [(String, JSONValue)] = [
                     ("name", .string(name)),
                     ("initialized", .bool(true)),
-                    ("type", .string(wallet.walletType == .multisig ? "multisig" : "regular")),
+                    ("type", .string(typeName)),
                     ("address", primary.map { .string($0) } ?? .null),
                     ("xpub", wallet.xpub.map { .string($0) } ?? .null),
                     ("addresses", .int(Int64(wallet.addressCount))),
