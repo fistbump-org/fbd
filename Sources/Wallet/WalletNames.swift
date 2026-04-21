@@ -126,7 +126,11 @@ extension WalletDB {
     /// Find the current name UTXO -- the most recent coin for this name
     /// from the set of covenant types that represent "ownership".
     public func findCurrentNameCoin(nameHash: NameHash) throws -> WalletCoin? {
-        let ownerTypes: Set<CovenantType> = [.register, .update, .renew, .transfer]
+        // FINALIZE is the incoming side of a transfer: after the old owner
+        // broadcasts sendfinalize, the new owner's UTXO is type FINALIZE
+        // until they do their first UPDATE/RENEW/TRANSFER, so it must count
+        // as ownership here.
+        let ownerTypes: Set<CovenantType> = [.register, .update, .renew, .transfer, .finalize]
         let all = try listUnspent()
         return all.first { coin in
             guard ownerTypes.contains(coin.covenant.type) else { return false }

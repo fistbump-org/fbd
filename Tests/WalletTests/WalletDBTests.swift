@@ -676,6 +676,40 @@ final class WalletDBTests: XCTestCase {
         XCTAssertEqual(found?.covenant.type, .register)
     }
 
+    func testFindCurrentNameCoinRecognizesFinalize() throws {
+        let wallet = try WalletDB(path: tmpDir, network: .main)
+        _ = try wallet.create(mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")
+        let addr = try wallet.getReceiveAddress()
+
+        let nameHash = NameHash(unchecked: [UInt8](repeating: 0xAA, count: 32))
+        // Only a FINALIZE coin — the state a wallet is in right after
+        // receiving a transferred name, before its first UPDATE.
+        let finalizeOutput = Output(value: 10_000, address: addr,
+            covenant: Covenant(type: .finalize, items: [
+                nameHash.bytes,
+                [UInt8](repeating: 0, count: 4),
+                [UInt8]("name".utf8),
+                [0],
+                [UInt8](repeating: 0, count: 4),
+                [UInt8](repeating: 0, count: 4),
+                [UInt8](repeating: 0, count: 32),
+            ]))
+        let tx = Transaction(
+            version: 0,
+            inputs: [Input(prevout: .null, sequence: 0xFFFF_FFFF)],
+            outputs: [finalizeOutput],
+            locktime: 0,
+            witnesses: [Witness(items: [])]
+        )
+        let block = Block(header: makeTestHeader(), transactions: [makeTestCoinbase(), tx], balloonProof: regtestProof(for: makeTestHeader()))
+        try wallet.indexBlock(block, height: 1)
+
+        let found = try wallet.findCurrentNameCoin(nameHash: nameHash)
+        XCTAssertNotNil(found,
+                        "FINALIZE coin must count as ownership so the recipient of a transfer can update/renew the name")
+        XCTAssertEqual(found?.covenant.type, .finalize)
+    }
+
     func testFindCurrentNameCoinIgnoresNonOwnerTypes() throws {
         let wallet = try WalletDB(path: tmpDir, network: .main)
         _ = try wallet.create(mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")
