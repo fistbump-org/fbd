@@ -1382,6 +1382,38 @@ extension FullNode {
                 }
             }
 
+        // Derive a receive address from a third party's account xpub (read-only; no wallet, no
+        // signing). Lets the registry generate addresses for TLD owners so buyer payments go
+        // straight to them. Same derivation as the watch-only receive path.
+        handlers["deriveaddress"] = { req in
+                let params = req.params
+                guard let xpubStr = params.first?.stringValue, !xpubStr.isEmpty else {
+                    throw RPCError.invalidParams("expected: deriveaddress <xpub> <index> [branch]")
+                }
+                guard params.count >= 2, let idxVal = params[1].intValue,
+                      idxVal >= 0, idxVal < 0x8000_0000 else {
+                    throw RPCError.invalidParams("index must be a non-negative integer below 2^31")
+                }
+                // optional branch: 0 = receive (default), 1 = change
+                let branchVal = params.count >= 3 ? (params[2].intValue ?? 0) : 0
+                guard branchVal == 0 || branchVal == 1 else {
+                    throw RPCError.invalidParams("branch must be 0 (receive) or 1 (change)")
+                }
+                let accountPub: ExtendedPublicKey
+                do {
+                    accountPub = try ExtendedPublicKey.deserialize(xpubStr)
+                } catch {
+                    throw RPCError.invalidParams("invalid xpub")
+                }
+                let pubKey = try accountPub.derive(UInt32(branchVal)).derive(UInt32(idxVal)).key
+                let hash = try Blake2bHash.hash(pubKey, size: 20)
+                let addr = try Address(version: 0, hash: hash)
+                return .object([
+                    ("address", .string(addr.toBech32(network: network))),
+                    ("hash", .string(HexEncoding.encode(addr.hash))),
+                ])
+            }
+
         // MARK: Backup / Import
 
         handlers["backupwallet"] = { req in
