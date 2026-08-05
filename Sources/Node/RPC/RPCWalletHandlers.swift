@@ -2418,6 +2418,23 @@ extension FullNode {
                         isForfeited = true
                     }
 
+                    // Did we actually win? A losing bidder holds an unspent
+                    // REVEAL coin too, right up until they redeem it, so
+                    // `isRevealed` proves we took part — not that we won. Only
+                    // the reveal the chain records as `ns.owner` can be
+                    // registered, which is exactly the test `sendmany register`
+                    // applies (see addRegisterOps). Anything laxer here shows a
+                    // Register button that always fails with "no eligible names
+                    // found", and suppresses the redeem the loser needs to get
+                    // their lockup back.
+                    let ownsWinningReveal = revealCoins.contains { coin in
+                        guard let nh = coin.covenant.items.first, nh == bid.nameHash.bytes else { return false }
+                        guard let owner = ns.owner else { return false }
+                        return coin.outpoint.hash.bytes == owner.hash
+                            && coin.outpoint.index == UInt32(owner.index)
+                            && coin.height >= ns.height
+                    }
+
                     // Repair: broken bid nonce (one per name)
                     if needsRepair && !isRevealed && (st == .bidding || st == .reveal)
                         && !repairNameHashes.contains(bid.nameHash) {
@@ -2445,7 +2462,7 @@ extension FullNode {
 
                     // Register: auction closed, bid revealed, not registered, not expired (one per name)
                     if st == .closed && isRevealed && !isForfeited && !ns.registered
-                        && !ns.isExpired(at: currentHeight, params: nameParams) && ns.owner != nil
+                        && !ns.isExpired(at: currentHeight, params: nameParams) && ownsWinningReveal
                         && !registerNameHashes.contains(bid.nameHash) {
                         registerNameHashes.insert(bid.nameHash)
                         let deadline = ns.registerDeadlineHeight(params: nameParams)

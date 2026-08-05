@@ -422,7 +422,10 @@ let package = Package(
 
         .testTarget(
             name: "MiningTests",
-            dependencies: ["Mining", "Base", "ExtCrypto", "Protocol", "Consensus", "Chain", "Mempool"],
+            dependencies: [
+                "Mining", "Base", "ExtCrypto", "Protocol", "Consensus", "Chain", "Mempool",
+                .product(name: "Logging", package: "swift-log"),
+            ],
             path: "Tests/MiningTests"
         ),
 
@@ -436,7 +439,7 @@ let package = Package(
 
         .testTarget(
             name: "NodeTests",
-            dependencies: ["Node", "Base", "RPC", "Wallet", "Chain", "Mempool", "Protocol", "ExtCrypto", "Consensus"],
+            dependencies: ["Node", "Base", "RPC", "Wallet", "Chain", "Mempool", "Protocol", "Covenants", "ExtCrypto", "Consensus"],
             path: "Tests/NodeTests"
         ),
 
