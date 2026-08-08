@@ -114,6 +114,20 @@ let package = Package(
             path: "Sources/Storage"
         ),
 
+        // MARK: - Vendored C: BalloonHash
+
+        .target(
+            name: "CBalloon",
+            dependencies: [],
+            path: "Sources/CBalloon",
+            sources: ["src"],
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(["-O3", "-march=native"], .when(platforms: [.linux])),
+                .unsafeFlags(["-O3", "-mcpu=native"], .when(platforms: [.macOS])),
+            ]
+        ),
+
         // MARK: - Layer 1: Cryptography
 
         .target(
@@ -271,6 +285,7 @@ let package = Package(
             dependencies: [
                 "Base",
                 "ExtCrypto",
+                "CBalloon",
                 "Protocol",
                 "Consensus",
                 "Chain",

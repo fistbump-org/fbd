@@ -16,21 +16,32 @@ private final class MiningResult: @unchecked Sendable {
     private var _stopped = false
 
     private var _hashes: UInt64 = 0
+    private let stopHook: @Sendable () -> Void
+
+    init(stopHook: @escaping @Sendable () -> Void = {}) {
+        self.stopHook = stopHook
+    }
 
     /// Try to claim a winning nonce. Returns true if this thread won.
     func claim(_ nonce: UInt32) -> Bool {
         lock.lock()
-        defer { lock.unlock() }
-        guard _nonce == UInt64.max else { return false }
+        guard _nonce == UInt64.max, !_stopped else {
+            lock.unlock()
+            return false
+        }
         _nonce = UInt64(nonce)
+        lock.unlock()
+        stopHook()
         return true
     }
 
     /// Signal all threads to stop (stale work or cancellation).
     func stop() {
         lock.lock()
+        let needsHook = !_stopped
         _stopped = true
         lock.unlock()
+        if needsHook { stopHook() }
     }
 
     /// Check if mining should continue.
@@ -62,6 +73,31 @@ private final class MiningResult: @unchecked Sendable {
     }
 }
 
+private final class ActiveBufferRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffers: [MiningBuffer] = []
+
+    func add(_ buffer: MiningBuffer) {
+        lock.lock()
+        buffers.append(buffer)
+        lock.unlock()
+    }
+
+    func remove(_ buffer: MiningBuffer) {
+        lock.lock()
+        buffers.removeAll { $0 === buffer }
+        lock.unlock()
+    }
+
+    func cancelAll() {
+        lock.lock()
+        for buffer in buffers {
+            buffer.cancelled = 1
+        }
+        lock.unlock()
+    }
+}
+
 /// A continuous CPU miner that runs as a background task.
 ///
 /// Uses all available CPU cores to mine in parallel. Each core works on a
@@ -74,6 +110,7 @@ public final class CPUMiner: Sendable {
     private let address: Address
     private let logger: Logger
     private let threads: Int
+    private let bufferPool: BufferPool
     private let onBlockMined: @Sendable (Block, ChainEntry) -> Void
     private let onHashRate: @Sendable (_ hashRate: Double, _ hashes: UInt64, _ elapsed: Double) -> Void
 
@@ -101,6 +138,7 @@ public final class CPUMiner: Sendable {
         self.address = address
         self.threads = threads > 0 ? threads : max(1, ProcessInfo.processInfo.activeProcessorCount - 1)
         self.logger = logger
+        self.bufferPool = BufferPool(slots: chain.params.balloonSlots, maxPooled: self.threads)
         self.onBlockMined = onBlockMined
         self.onHashRate = onHashRate
     }
@@ -197,6 +235,8 @@ public final class CPUMiner: Sendable {
         let threadCount = self.threads
         let templateTxCount = mempool.count
         let templateTime = Date()
+        let password = try Self.buildPassword(for: th)
+        let saltTemplate = Self.buildSalt(nonce: 0, extraNonce: th.extraNonce)
 
         var miningMeta: Logger.Metadata = [
             "bits": "\(String(format: "0x%08x", bits))",
@@ -208,29 +248,51 @@ public final class CPUMiner: Sendable {
         }
         logger.debug("Mining block \(tip.height + 1)", metadata: miningMeta, source: "Miner")
 
-        let result = MiningResult()
+        let activeBuffers = ActiveBufferRegistry()
+        let result = MiningResult {
+            activeBuffers.cancelAll()
+        }
         let group = DispatchGroup()
 
         let logger = self.logger
+        let slots = params.balloonSlots
+        let rounds = params.balloonRounds
+        let delta = params.balloonDelta
         for tid in 0..<threadCount {
             group.enter()
             Thread.detachNewThread {
                 defer { group.leave() }
+                let buffer = self.bufferPool.checkout()
+                activeBuffers.add(buffer)
+                defer {
+                    activeBuffers.remove(buffer)
+                    self.bufferPool.checkin(buffer)
+                }
+
+                var salt = saltTemplate
                 var nonce = UInt32(tid)
                 let stride = UInt32(threadCount)
                 var hashes: UInt64 = 0
 
                 while !result.shouldStop {
-                    let h = BlockHeader(
-                        nonce: nonce, time: th.time, prevBlock: th.prevBlock,
-                        treeRoot: th.treeRoot, extraNonce: th.extraNonce,
-                        reservedRoot: th.reservedRoot, witnessRoot: th.witnessRoot,
-                        merkleRoot: th.merkleRoot, version: th.version, bits: th.bits
-                    )
+                    salt[0] = UInt8(truncatingIfNeeded: nonce)
+                    salt[1] = UInt8(truncatingIfNeeded: nonce &>> 8)
+                    salt[2] = UInt8(truncatingIfNeeded: nonce &>> 16)
+                    salt[3] = UInt8(truncatingIfNeeded: nonce &>> 24)
+
                     let hash: Hash256
                     do {
-                        hash = try ProofOfWork.powHash(for: h, params: params, isCancelled: { result.shouldStop })
-                    } catch is BalloonHash.Cancelled {
+                        let hashBytes = try FastBalloonHash.hash(
+                            password: password,
+                            salt: salt,
+                            buffer: buffer,
+                            slots: slots,
+                            rounds: rounds,
+                            delta: delta,
+                            isCancelled: { result.shouldStop }
+                        )
+                        hash = Hash256(unchecked: hashBytes)
+                    } catch is FastBalloonHash.Cancelled {
                         break
                     } catch {
                         logger.error("Mining thread \(tid) error: \(error)", source: "Miner")
@@ -361,6 +423,38 @@ public final class CPUMiner: Sendable {
 
         onBlockMined(block, entry)
         return currentRate
+    }
+
+    private static func buildPassword(for header: BlockHeader) throws -> [UInt8] {
+        var rawPassword = [UInt8]()
+        rawPassword.reserveCapacity(176)
+        rawPassword.append(contentsOf: header.prevBlock.bytes)
+        rawPassword.append(contentsOf: header.merkleRoot.bytes)
+        rawPassword.append(contentsOf: header.witnessRoot.bytes)
+        rawPassword.append(contentsOf: header.treeRoot.bytes)
+        rawPassword.append(contentsOf: header.reservedRoot.bytes)
+
+        var time = header.time.littleEndian
+        withUnsafeBytes(of: &time) { rawPassword.append(contentsOf: $0) }
+
+        var bits = header.bits.littleEndian
+        withUnsafeBytes(of: &bits) { rawPassword.append(contentsOf: $0) }
+
+        var version = header.version.littleEndian
+        withUnsafeBytes(of: &version) { rawPassword.append(contentsOf: $0) }
+
+        return try Blake2bHash.hash(rawPassword, size: 32)
+    }
+
+    private static func buildSalt(nonce: UInt32, extraNonce: [UInt8]) -> [UInt8] {
+        var salt = [UInt8]()
+        salt.reserveCapacity(28)
+
+        var nonceLE = nonce.littleEndian
+        withUnsafeBytes(of: &nonceLE) { salt.append(contentsOf: $0) }
+        salt.append(contentsOf: extraNonce)
+
+        return salt
     }
 
     /// Remove mempool transactions that would fail block validation.
